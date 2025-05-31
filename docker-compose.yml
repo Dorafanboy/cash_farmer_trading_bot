@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cash_farmer_trading_bot
+    image: bot:latest 
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/config.yml:/app/config/config.yml:ro 
+    restart: unless-stopped
