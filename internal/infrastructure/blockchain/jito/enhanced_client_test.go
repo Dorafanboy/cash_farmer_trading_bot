@@ -131,36 +131,3 @@ func TestSetDebug(t *testing.T) {
 		t.Error("Expected debug to be false after SetDebug(false)")
 	}
 }
-
-// Integration test (commented out - requires real network connection)
-/*
-func TestGetTipAccountsIntegration(t *testing.T) {
-	// Skip if not running integration tests
-	if testing.Short() {
-		t.Skip("Skipping integration test")
-	}
-
-	client := NewEnhancedJitoClientFromURL("https://amsterdam.mainnet.block-engine.jito.wtf/api/v1")
-	client.SetDebug(true)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	tipAccounts, err := client.GetTipAccounts(ctx)
-	if err != nil {
-		t.Fatalf("Failed to get tip accounts: %v", err)
-	}
-
-	if len(tipAccounts) == 0 {
-		t.Error("Expected at least one tip account")
-	}
-
-	t.Logf("Got %d tip accounts", len(tipAccounts))
-	for i, account := range tipAccounts {
-		t.Logf("Tip account %d: %s", i, account)
-		if len(account) < 32 {
-			t.Errorf("Tip account %d appears to be too short: %s", i, account)
-		}
-	}
-}
-*/

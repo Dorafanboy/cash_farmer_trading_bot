@@ -2,12 +2,12 @@ package jito
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
-	jitorpc "github.com/jito-labs/jito-go-rpc"
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 // Config holds configuration for Enhanced Jito Client
@@ -17,10 +17,10 @@ type Config struct {
 	Debug   bool   // Enable debug logging
 }
 
-// EnhancedJitoClient wraps the official jito-go-rpc library
-// while maintaining backward compatibility with existing interfaces
+// EnhancedJitoClient собственная реализация Jito клиента с fasthttp + go-json
+// БЕЗ зависимости от jito-go-rpc
 type EnhancedJitoClient struct {
-	client *jitorpc.JitoJsonRpcClient
+	client *fasthttp.Client
 	config *Config
 }
 
@@ -43,18 +43,33 @@ type JitoInflightBundle struct {
 	Slot         int64    `json:"slot"`
 }
 
+// Internal RPC request/response types
+type jitoRPCRequest struct {
+	JSONRPC string      `json:"jsonrpc"`
+	ID      int         `json:"id"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params"`
+}
+
+type jitoRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      int             `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jitoRPCError   `json:"error,omitempty"`
+}
+
+type jitoRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
 // NewEnhancedJitoClient creates a new enhanced Jito client
 func NewEnhancedJitoClient(config *Config) *EnhancedJitoClient {
-	client := jitorpc.NewJitoJsonRpcClient(config.BaseURL, config.UUID)
-
-	// Set debug mode if enabled
-	if config.Debug {
-		debug := true
-		client.Debug = &debug
-	}
-
 	return &EnhancedJitoClient{
-		client: client,
+		client: &fasthttp.Client{
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		},
 		config: config,
 	}
 }
@@ -69,6 +84,67 @@ func NewEnhancedJitoClientFromURL(rpcURL string) *EnhancedJitoClient {
 	return NewEnhancedJitoClient(config)
 }
 
+// makeRPCCall выполняет JSON-RPC вызов к Jito API
+func (e *EnhancedJitoClient) makeRPCCall(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	req := jitoRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  method,
+		Params:  params,
+	}
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	if e.config.Debug {
+		log.Printf("🔍 JITO RPC REQUEST: %s to %s", method, e.config.BaseURL)
+	}
+
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
+
+	httpReq.SetRequestURI(e.config.BaseURL)
+	httpReq.Header.SetMethod(fasthttp.MethodPost)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "cash-farmer-bot/1.0")
+
+	// Add UUID header if configured
+	if e.config.UUID != "" {
+		httpReq.Header.Set("X-UUID", e.config.UUID)
+	}
+
+	httpReq.SetBody(reqBody)
+
+	err = e.client.DoTimeout(httpReq, httpResp, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
+	}
+
+	if httpResp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("jito RPC request failed with status %d", httpResp.StatusCode())
+	}
+
+	var rpcResp jitoRPCResponse
+	if err := json.Unmarshal(httpResp.Body(), &rpcResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("jito RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	if e.config.Debug {
+		log.Printf("✅ JITO RPC SUCCESS: %s", method)
+	}
+
+	return rpcResp.Result, nil
+}
+
 // BACKWARD COMPATIBILITY METHODS - Matching existing JitoClient interface
 
 // SendBundle submits a bundle of transactions to Jito
@@ -79,9 +155,11 @@ func (e *EnhancedJitoClient) SendBundle(ctx context.Context, transactions []stri
 
 	log.Printf("Sending bundle with %d transactions via enhanced client", len(transactions))
 
-	// Convert to format expected by jito-go-rpc v0.2.1 ([][]string)
-	bundleTransactions := [][]string{transactions}
-	result, err := e.client.SendBundle(bundleTransactions)
+	params := map[string]interface{}{
+		"encodedTransactions": transactions,
+	}
+
+	result, err := e.makeRPCCall(ctx, "sendBundle", params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send bundle: %w", err)
 	}
@@ -103,14 +181,36 @@ func (e *EnhancedJitoClient) GetBundleStatuses(ctx context.Context, bundleIDs []
 		return []JitoBundleStatus{}, nil
 	}
 
-	statusResponse, err := e.client.GetBundleStatuses(bundleIDs)
+	params := map[string]interface{}{
+		"value": bundleIDs,
+	}
+
+	result, err := e.makeRPCCall(ctx, "getBundleStatuses", params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bundle statuses: %w", err)
 	}
 
-	// Convert official library response to our format
+	// Parse bundle statuses response
+	var response struct {
+		Context struct {
+			Slot int64 `json:"slot"`
+		} `json:"context"`
+		Value []struct {
+			BundleID           string      `json:"bundle_id"`
+			ConfirmationStatus string      `json:"confirmation_status"`
+			Slot               int64       `json:"slot"`
+			Transactions       []string    `json:"transactions"`
+			Err                interface{} `json:"err"`
+		} `json:"value"`
+	}
+
+	if err := json.Unmarshal(result, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse bundle statuses: %w", err)
+	}
+
+	// Convert to our format
 	var statuses []JitoBundleStatus
-	for _, value := range statusResponse.Value {
+	for _, value := range response.Value {
 		status := JitoBundleStatus{
 			BundleID:     value.BundleID,
 			Status:       value.ConfirmationStatus,
@@ -119,8 +219,8 @@ func (e *EnhancedJitoClient) GetBundleStatuses(ctx context.Context, bundleIDs []
 		}
 
 		// Handle error field if present
-		if value.Err.Ok != nil {
-			if errStr, ok := value.Err.Ok.(string); ok {
+		if value.Err != nil {
+			if errStr, ok := value.Err.(string); ok && errStr != "" {
 				status.Error = &errStr
 			}
 		}
@@ -147,12 +247,12 @@ func (e *EnhancedJitoClient) GetBundleStatus(ctx context.Context, bundleID strin
 
 // GetInflightBundleStatuses retrieves all inflight bundles
 func (e *EnhancedJitoClient) GetInflightBundleStatuses(ctx context.Context) ([]JitoInflightBundle, error) {
-	result, err := e.client.GetInflightBundleStatuses(nil)
+	result, err := e.makeRPCCall(ctx, "getInflightBundleStatuses", []interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get inflight bundle statuses: %w", err)
 	}
 
-	// Parse the result - structure may vary
+	// Parse the result
 	var bundles []JitoInflightBundle
 	if err := json.Unmarshal(result, &bundles); err != nil {
 		// Try alternative parsing if needed
@@ -165,7 +265,7 @@ func (e *EnhancedJitoClient) GetInflightBundleStatuses(ctx context.Context) ([]J
 
 // GetTipAccounts retrieves Jito tip accounts for priority fees
 func (e *EnhancedJitoClient) GetTipAccounts(ctx context.Context) ([]string, error) {
-	result, err := e.client.GetTipAccounts()
+	result, err := e.makeRPCCall(ctx, "getTipAccounts", []interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tip accounts: %w", err)
 	}
@@ -238,7 +338,7 @@ func (e *EnhancedJitoClient) ValidateBundle(transactions []string) error {
 	return nil
 }
 
-// ENHANCED METHODS - New functionality from jito-go-rpc
+// ENHANCED METHODS - New functionality
 
 // Static list of known Jito tip accounts (fallback for rate-limited endpoints)
 var staticTipAccounts = []string{
@@ -254,8 +354,19 @@ var staticTipAccounts = []string{
 
 // GetRandomTipAccount returns a random tip account for MEV protection
 func (e *EnhancedJitoClient) GetRandomTipAccount(ctx context.Context) (*TipAccount, error) {
-	// Fallback to static tip accounts (official API may be rate limited)
-	log.Printf("🔧 TIP ACCOUNTS: Using static tip account")
+	// Try to get tip accounts from API first
+	tipAccounts, err := e.GetTipAccounts(ctx)
+	if err == nil && len(tipAccounts) > 0 {
+		// Use first account from API
+		selectedAddress := tipAccounts[0]
+		return &TipAccount{
+			Account:   selectedAddress,
+			PublicKey: selectedAddress,
+		}, nil
+	}
+
+	// Fallback to static tip accounts
+	log.Printf("🔧 TIP ACCOUNTS: Using static tip account (API unavailable)")
 	staticIndex := len(staticTipAccounts) - 1 // Use last account as default
 	if len(staticTipAccounts) > 1 {
 		// Simple rotation based on time
@@ -272,7 +383,12 @@ func (e *EnhancedJitoClient) GetRandomTipAccount(ctx context.Context) (*TipAccou
 
 // SendTransaction sends a single transaction with optional bundle-only mode
 func (e *EnhancedJitoClient) SendTransaction(ctx context.Context, txData string, bundleOnly bool) (string, error) {
-	result, err := e.client.SendTxn(txData, bundleOnly)
+	params := map[string]interface{}{
+		"encodedTransaction": txData,
+		"bundleOnly":         bundleOnly,
+	}
+
+	result, err := e.makeRPCCall(ctx, "sendTransaction", params)
 	if err != nil {
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
@@ -310,18 +426,11 @@ func (e *EnhancedJitoClient) GetRandomTipAccountAddress(ctx context.Context) (st
 // SetUUID updates the UUID for authenticated endpoints
 func (e *EnhancedJitoClient) SetUUID(uuid string) {
 	e.config.UUID = uuid
-	// Create new client with updated UUID
-	e.client = jitorpc.NewJitoJsonRpcClient(e.config.BaseURL, uuid)
-	if e.config.Debug {
-		debug := true
-		e.client.Debug = &debug
-	}
 }
 
 // SetDebug enables or disables debug logging
 func (e *EnhancedJitoClient) SetDebug(enabled bool) {
 	e.config.Debug = enabled
-	e.client.Debug = &enabled
 }
 
 // GetConfig returns the current client configuration

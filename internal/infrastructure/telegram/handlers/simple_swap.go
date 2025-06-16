@@ -17,14 +17,13 @@ import (
 	"cash-farmer/internal/application/services"
 	"cash-farmer/internal/domain/entities"
 	"cash-farmer/internal/domain/valueobjects"
+	"cash-farmer/internal/infrastructure/blockchain/jito"
 
 	"github.com/gagliardetto/solana-go"
 	associatedtokenaccount "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/google/uuid"
-	jitorpc "github.com/jito-labs/jito-go-rpc"
 )
 
 var (
@@ -975,10 +974,8 @@ func (h *TradingHandler) simpleGetTipAccountsAcrossEndpoints() ([]string, string
 
 	for i, endpoint := range simpleJitoEndpoints {
 		go func(endpoint string, index int) {
-			uuid := uuid.New().String()
-			jitoClient := jitorpc.NewJitoJsonRpcClient(endpoint, uuid)
-			debug := true
-			jitoClient.Debug = &debug
+			// Используем наш собственный Jito клиент
+			jitoClient := jito.NewEnhancedJitoClientFromURL(endpoint)
 
 			var tipAccounts []string
 			var lastErr error
@@ -991,14 +988,7 @@ func (h *TradingHandler) simpleGetTipAccountsAcrossEndpoints() ([]string, string
 				default:
 				}
 
-				tipAccountsRaw, err := jitoClient.GetTipAccounts()
-				if err != nil {
-					lastErr = err
-					continue
-				}
-
-				var tipAccountsResponse []string
-				err = json.Unmarshal(tipAccountsRaw, &tipAccountsResponse)
+				tipAccountsResponse, err := jitoClient.GetTipAccounts(ctx)
 				if err != nil {
 					lastErr = err
 					continue
@@ -1050,10 +1040,8 @@ func (h *TradingHandler) simpleSendBundleAcrossEndpoints(bundleRequest [][]strin
 
 	for i, endpoint := range simpleJitoEndpoints {
 		go func(endpoint string, index int) {
-			uuid := uuid.New().String()
-			jitoClient := jitorpc.NewJitoJsonRpcClient(endpoint, uuid)
-			debug := true
-			jitoClient.Debug = &debug
+			// Используем наш собственный Jito клиент
+			jitoClient := jito.NewEnhancedJitoClientFromURL(endpoint)
 
 			bundleId, err := h.simpleSendBundleWithRetryContext(ctx, jitoClient, bundleRequest, endpoint)
 			resultChan <- result{
@@ -1082,7 +1070,7 @@ func (h *TradingHandler) simpleSendBundleAcrossEndpoints(bundleRequest [][]strin
 	return "", "", fmt.Errorf("all endpoints failed")
 }
 
-func (h *TradingHandler) simpleSendBundleWithRetryContext(ctx context.Context, jitoClient *jitorpc.JitoJsonRpcClient, bundleRequest [][]string, endpoint string) (string, error) {
+func (h *TradingHandler) simpleSendBundleWithRetryContext(ctx context.Context, jitoClient *jito.EnhancedJitoClient, bundleRequest [][]string, endpoint string) (string, error) {
 	var bundleId string
 	maxRetries := 3
 
@@ -1093,7 +1081,9 @@ func (h *TradingHandler) simpleSendBundleWithRetryContext(ctx context.Context, j
 		default:
 		}
 
-		bundleIdRaw, err := jitoClient.SendBundle(bundleRequest)
+		// Конвертируем [][]string в []string для нашего API
+		transactions := bundleRequest[0] // Берем первый bundle из массива
+		bundleResult, err := jitoClient.SendBundle(ctx, transactions)
 		if err != nil {
 			if strings.Contains(fmt.Sprintf("%v", err), "rate limited") || strings.Contains(fmt.Sprintf("%v", err), "Too Many Requests") {
 				if attempt < maxRetries-1 {
@@ -1107,14 +1097,7 @@ func (h *TradingHandler) simpleSendBundleWithRetryContext(ctx context.Context, j
 			return "", err
 		}
 
-		err = json.Unmarshal(bundleIdRaw, &bundleId)
-		if err != nil {
-			if attempt < maxRetries-1 {
-				continue
-			}
-			return "", err
-		}
-
+		bundleId = bundleResult.BundleID
 		if bundleId == "" {
 			if attempt < maxRetries-1 {
 				continue

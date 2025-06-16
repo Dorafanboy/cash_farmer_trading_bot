@@ -1,23 +1,22 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"cash-farmer/internal/domain/valueobjects"
+
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 // JupiterClient handles communication with Jupiter Swap API
 type JupiterClient struct {
-	httpClient *http.Client
-	baseURL    string
+	client  *fasthttp.Client
+	baseURL string
 }
 
 // JupiterPriceResponse represents response from Jupiter price API
@@ -123,8 +122,9 @@ type JupiterSimulationError struct {
 // NewJupiterClient creates a new Jupiter API client
 func NewJupiterClient(baseURL string) *JupiterClient {
 	return &JupiterClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+		client: &fasthttp.Client{
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
 		},
 		baseURL: baseURL,
 	}
@@ -136,26 +136,27 @@ func (j *JupiterClient) GetSolPrice(ctx context.Context) (*valueobjects.SolPrice
 	solMintAddress := "So11111111111111111111111111111111111111112"
 	url := fmt.Sprintf("https://price.jup.ag/v4/price?ids=%s", solMintAddress)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
 
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodGet)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "cash-farmer-bot/1.0")
 
-	resp, err := j.httpClient.Do(req)
+	err := j.client.DoTimeout(req, resp, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode())
 	}
 
 	var priceResp JupiterPriceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&priceResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &priceResp); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
@@ -194,26 +195,27 @@ func (j *JupiterClient) GetQuote(ctx context.Context, req JupiterQuoteRequest) (
 
 	url += params
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
 
+	httpReq.SetRequestURI(url)
+	httpReq.Header.SetMethod(fasthttp.MethodGet)
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "cash-farmer-bot/1.0")
 
-	resp, err := j.httpClient.Do(httpReq)
+	err := j.client.DoTimeout(httpReq, httpResp, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jupiter quote API request failed with status %d", resp.StatusCode)
+	if httpResp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("jupiter quote API request failed with status %d", httpResp.StatusCode())
 	}
 
 	var quoteResp JupiterQuoteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&quoteResp); err != nil {
+	if err := json.Unmarshal(httpResp.Body(), &quoteResp); err != nil {
 		return nil, fmt.Errorf("failed to decode quote response: %w", err)
 	}
 
@@ -253,35 +255,32 @@ func (j *JupiterClient) GetSwapTransaction(ctx context.Context, req JupiterSwapR
 		fmt.Printf("🔍 JUPITER REQUEST BODY: %s\n", string(reqBody))
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
 
+	httpReq.SetRequestURI(url)
+	httpReq.Header.SetMethod(fasthttp.MethodPost)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "cash-farmer-bot/1.0")
+	httpReq.SetBody(reqBody)
 
-	resp, err := j.httpClient.Do(httpReq)
+	err = j.client.DoTimeout(httpReq, httpResp, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("❌ JUPITER SWAP API ERROR: Status=%d\n", resp.StatusCode)
+	if httpResp.StatusCode() != fasthttp.StatusOK {
+		fmt.Printf("❌ JUPITER SWAP API ERROR: Status=%d\n", httpResp.StatusCode())
 		// Read error response body
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		fmt.Printf("❌ JUPITER SWAP API ERROR BODY: %s\n", string(bodyBytes))
-		return nil, fmt.Errorf("jupiter swap API request failed with status %d", resp.StatusCode)
+		fmt.Printf("❌ JUPITER SWAP API ERROR BODY: %s\n", string(httpResp.Body()))
+		return nil, fmt.Errorf("jupiter swap API request failed with status %d", httpResp.StatusCode())
 	}
 
 	// CRITICAL: Read raw response body first
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("❌ JUPITER SWAP API ERROR: Failed to read response body: %v\n", err)
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
+	bodyBytes := httpResp.Body()
 
 	// Truncate raw response if too long
 	if len(bodyBytes) > 2000 {

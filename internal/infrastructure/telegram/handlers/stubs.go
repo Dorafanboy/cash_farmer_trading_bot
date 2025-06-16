@@ -1787,20 +1787,22 @@ func (h *TradingHandler) createPositionAfterBuy(ctx context.Context, userID int6
 
 // PortfolioHandler - реальная реализация
 type PortfolioHandler struct {
-	services  *services.SimpleServiceContainer
-	sessions  *sessions.SessionManager
-	api       *tgbotapi.BotAPI
-	logger    *log.Logger
-	uiBuilder *ui.Builder
+	services    *services.SimpleServiceContainer
+	sessions    *sessions.SessionManager
+	api         *tgbotapi.BotAPI
+	logger      *log.Logger
+	uiBuilder   *ui.Builder
+	cacheHelper *CachedDataHelper // НОВОЕ: кэш помощник
 }
 
 func NewPortfolioHandler(serviceContainer *services.SimpleServiceContainer, sessionManager *sessions.SessionManager, api *tgbotapi.BotAPI, logger *log.Logger) *PortfolioHandler {
 	return &PortfolioHandler{
-		services:  serviceContainer,
-		sessions:  sessionManager,
-		api:       api,
-		logger:    logger,
-		uiBuilder: ui.NewBuilder(),
+		services:    serviceContainer,
+		sessions:    sessionManager,
+		api:         api,
+		logger:      logger,
+		uiBuilder:   ui.NewBuilder(),
+		cacheHelper: NewCachedDataHelper(serviceContainer), // НОВОЕ: инициализируем кэш
 	}
 }
 
@@ -1808,6 +1810,30 @@ func (h *PortfolioHandler) HandlePositions(ctx context.Context, query *tgbotapi.
 	userID := query.From.ID
 	h.logger.Printf("=== STARTING HandlePositions for user: %d ===", userID)
 
+	// НОВАЯ ЛОГИКА: Используем кэшированную версию
+	if h.cacheHelper != nil {
+		optimizedText, err := h.cacheHelper.BuildOptimizedPositionsText(ctx, userID)
+		if err == nil && optimizedText != "" {
+			h.logger.Printf("✅ CACHE: Using optimized positions text for user %d", userID)
+
+			// Создание клавиатуры
+			backButton := tgbotapi.NewInlineKeyboardButtonData("🔙 Back", "menu")
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(backButton),
+			)
+
+			edit := tgbotapi.NewEditMessageText(query.Message.Chat.ID, query.Message.MessageID, optimizedText)
+			edit.ParseMode = "HTML"
+			edit.ReplyMarkup = &keyboard
+
+			_, err := h.api.Send(edit)
+			return err
+		}
+
+		h.logger.Printf("⚠️ CACHE: Fallback to legacy positions for user %d: %v", userID, err)
+	}
+
+	// LEGACY FALLBACK: старая логика для совместимости
 	// Проверяем основные компоненты на nil
 	if h == nil {
 		h.logger.Printf("ERROR: PortfolioHandler is nil!")

@@ -2,19 +2,19 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
 	"cash-farmer/internal/domain/valueobjects"
 
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 	"golang.org/x/time/rate"
 )
 
 // DexscreenerClient handles communication with Dexscreener API
 type DexscreenerClient struct {
-	httpClient  *http.Client
+	client      *fasthttp.Client
 	baseURL     string
 	rateLimiter *rate.Limiter
 }
@@ -49,8 +49,9 @@ type DexscreenerPair struct {
 // NewDexscreenerClient creates a new Dexscreener API client
 func NewDexscreenerClient(baseURL string) *DexscreenerClient {
 	return &DexscreenerClient{
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
+		client: &fasthttp.Client{
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
 		},
 		baseURL:     baseURL,
 		rateLimiter: rate.NewLimiter(rate.Every(2*time.Second), 1),
@@ -69,20 +70,28 @@ func (d *DexscreenerClient) GetTokenMetrics(
 	url := fmt.Sprintf("https://api.dexscreener.com/tokens/v1/solana/%s", address.Value())
 	fmt.Printf("🔍 DEXSCREENER API: Making request to: %s\n", url)
 
-	resp, err := d.httpClient.Get(url)
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodGet)
+
+	err := d.client.DoTimeout(req, resp, 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	fmt.Printf("🔍 DEXSCREENER API: Response status: %d\n", resp.StatusCode)
+	statusCode := resp.StatusCode()
+	fmt.Printf("🔍 DEXSCREENER API: Response status: %d\n", statusCode)
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
+	if statusCode != 200 {
+		return nil, fmt.Errorf("API request failed with status %d", statusCode)
 	}
 
 	var tokenPairs []DexscreenerPair
-	if err := json.NewDecoder(resp.Body).Decode(&tokenPairs); err != nil {
+	if err := json.Unmarshal(resp.Body(), &tokenPairs); err != nil {
 		fmt.Printf("🚨 DEXSCREENER API ERROR: Failed to decode response: %v\n", err)
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}

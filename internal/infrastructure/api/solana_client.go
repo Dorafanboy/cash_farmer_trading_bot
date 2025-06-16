@@ -1,19 +1,19 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 // SolanaClient handles communication with Solana RPC
 type SolanaClient struct {
-	httpClient *http.Client
-	rpcURL     string
+	client *fasthttp.Client
+	rpcURL string
 }
 
 // SolanaRPCRequest represents a JSON-RPC request to Solana
@@ -121,8 +121,9 @@ type SolanaTransactionMeta struct {
 // NewSolanaClient creates a new Solana RPC client
 func NewSolanaClient(rpcURL string) *SolanaClient {
 	return &SolanaClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+		client: &fasthttp.Client{
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
 		},
 		rpcURL: rpcURL,
 	}
@@ -332,27 +333,29 @@ func (s *SolanaClient) makeRPCCall(ctx context.Context, req SolanaRPCRequest, re
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.rpcURL, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
 
+	httpReq.SetRequestURI(s.rpcURL)
+	httpReq.Header.SetMethod(fasthttp.MethodPost)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "cash-farmer-bot/1.0")
+	httpReq.SetBody(reqBody)
 
-	resp, err := s.httpClient.Do(httpReq)
+	err = s.client.DoTimeout(httpReq, httpResp, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("solana RPC request failed with status %d", resp.StatusCode)
+	if httpResp.StatusCode() != fasthttp.StatusOK {
+		return fmt.Errorf("solana RPC request failed with status %d", httpResp.StatusCode())
 	}
 
 	var rpcResp SolanaRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+	if err := json.Unmarshal(httpResp.Body(), &rpcResp); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 

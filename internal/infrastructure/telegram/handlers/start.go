@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
 
 	"cash-farmer/internal/application/services"
@@ -15,11 +14,12 @@ import (
 )
 
 type StartHandler struct {
-	services  *services.SimpleServiceContainer // ВРЕМЕННО: вернул обратно
-	sessions  *sessions.SessionManager
-	api       *tgbotapi.BotAPI
-	logger    *log.Logger
-	uiBuilder *ui.Builder
+	services    *services.SimpleServiceContainer // ВРЕМЕННО: вернул обратно
+	sessions    *sessions.SessionManager
+	api         *tgbotapi.BotAPI
+	logger      *log.Logger
+	uiBuilder   *ui.Builder
+	cacheHelper *CachedDataHelper // НОВОЕ: кэш помощник
 }
 
 func NewStartHandler(
@@ -29,11 +29,12 @@ func NewStartHandler(
 	logger *log.Logger,
 ) *StartHandler {
 	return &StartHandler{
-		services:  serviceContainer,
-		sessions:  sessionManager,
-		api:       api,
-		logger:    logger,
-		uiBuilder: ui.NewBuilder(),
+		services:    serviceContainer,
+		sessions:    sessionManager,
+		api:         api,
+		logger:      logger,
+		uiBuilder:   ui.NewBuilder(),
+		cacheHelper: NewCachedDataHelper(serviceContainer), // НОВОЕ: инициализируем кэш
 	}
 }
 
@@ -241,85 +242,30 @@ func (h *StartHandler) editWelcomeMessage(ctx context.Context, query *tgbotapi.C
 }
 
 func (h *StartHandler) buildWelcomeText(userID int64, walletAddress string, balance float64) string {
-	// Calculate USD value using real SOL price from DexScreener
-	usdValue := balance * 100 // Fallback: 1 SOL = $100
-
-	// Get real SOL price from DexScreener
+	// НОВАЯ ЛОГИКА: Используем кэшированную версию
 	ctx := context.Background()
-	h.logger.Printf("🔍 DEBUG: Getting SOL price from SolPriceService...")
 
-	solPriceService := h.services.GetSolPriceService()
-	if solPriceService == nil {
-		h.logger.Printf("❌ ERROR: SolPriceService is nil!")
-	} else {
-		solPriceObj, err := solPriceService.GetCachedSolPrice(ctx)
-		if err != nil {
-			h.logger.Printf("❌ ERROR: GetCachedSolPrice failed: %v", err)
-		} else if solPriceObj == nil {
-			h.logger.Printf("❌ ERROR: SolPrice object is nil")
-		} else {
-			solPriceFloat, _ := solPriceObj.PriceUSD().Float64()
-			usdValue = balance * solPriceFloat
-			h.logger.Printf("✅ SUCCESS: Real SOL price: $%.2f, calculated USD value: $%.2f", solPriceFloat, usdValue)
-		}
+	// Пытаемся получить оптимизированный текст
+	optimizedText, err := h.cacheHelper.BuildOptimizedWelcomeText(ctx, userID)
+	if err == nil && optimizedText != "" {
+		h.logger.Printf("✅ CACHE: Using optimized welcome text for user %d", userID)
+		return optimizedText
 	}
 
-	// 🔥 REAL PnL: Calculate real PnL using PortfolioService
-	var pnlString string = "🚀" // fallback
+	h.logger.Printf("⚠️ CACHE: Fallback to legacy welcome text for user %d: %v", userID, err)
 
-	// Get user's primary wallet for PnL calculation
-	wallets, err := h.services.GetWalletService().GetWallets(ctx, userID)
-	if err == nil && len(wallets) > 0 {
-		var primaryWallet *services.SimpleWallet
-		for _, wallet := range wallets {
-			if wallet.IsDefault && wallet.PublicKey == walletAddress {
-				primaryWallet = &wallet
-				break
-			}
-		}
+	// LEGACY FALLBACK: старая логика для совместимости
+	usdValue := balance * 100 // Fallback: 1 SOL = $100
+	pnlString := "🚀"
 
-		if primaryWallet != nil {
-			// Parse wallet ID to int64
-			if walletIDInt, parseErr := strconv.ParseInt(primaryWallet.ID, 10, 64); parseErr == nil {
-				// Use PortfolioService to calculate PnL
-				portfolioService := h.services.GetPortfolioService()
-				if portfolioService != nil {
-					if pnlSummary, pnlErr := portfolioService.CalculatePnL(ctx, walletIDInt); pnlErr == nil && pnlSummary != nil {
-						pnlValue := pnlSummary.TotalPnLUSD
-						if pnlValue != 0 {
-							// Рассчитываем процент PnL
-							// Получаем позиции для расчета общей стоимости входа
-							if positions, posErr := portfolioService.GetPositions(ctx, walletIDInt, true); posErr == nil && len(positions) > 0 {
-								var totalEntryValue float64 = 0.0
-								for _, position := range positions {
-									if position != nil && position.IsActive {
-										totalEntryValue += position.EntryPrice * position.Amount
-									}
-								}
+	// Get real SOL price from cache first
+	if solPrice, err := h.cacheHelper.GetSOLPrice(ctx); err == nil {
+		usdValue = balance * solPrice
+	}
 
-								var pnlPercent float64 = 0.0
-								if totalEntryValue > 0 {
-									pnlPercent = (pnlValue / totalEntryValue) * 100
-								}
-
-								if pnlValue > 0 {
-									pnlString = fmt.Sprintf("📈 +$%.2f (+%.1f%%)", pnlValue, pnlPercent)
-								} else {
-									pnlString = fmt.Sprintf("📉 $%.2f (%.1f%%)", pnlValue, pnlPercent)
-								}
-							} else {
-								// Fallback без процентов
-								if pnlValue > 0 {
-									pnlString = fmt.Sprintf("📈 +$%.2f", pnlValue)
-								} else {
-									pnlString = fmt.Sprintf("📉 $%.2f", pnlValue)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+	// Get PnL from cache
+	if cachedPnL, err := h.cacheHelper.GetPnLData(ctx, userID); err == nil {
+		pnlString = cachedPnL
 	}
 
 	// Add deposit warning for zero balance
