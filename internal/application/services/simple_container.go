@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"cash-farmer/internal/domain/entities"
+	"cash-farmer/internal/domain/valueobjects"
+
+	"github.com/shopspring/decimal"
 )
 
 // SimpleWallet представляет упрощенную модель кошелька для демонстрации
@@ -335,14 +338,24 @@ func NewSimpleServiceContainer() (*SimpleServiceContainer, error) {
 	// Создаем логгер для PnL Tracker
 	logger := log.New(log.Writer(), "[PnL] ", log.LstdFlags|log.Lshortfile)
 
-	// Создаем PnL Tracker с заглушками для demo режима
-	// В реальном режиме эти зависимости будут установлены через adapter
-	pnlTracker := NewPnLTracker(nil, nil, nil, logger)
+	// Создаем сервисы
+	portfolioService := NewSimplePortfolioService()
+
+	// Создаем простые реализации для demo режима
+	tokenDataService := &SimpleTokenDataService{}
+	solPriceService := &SimpleSolPriceService{}
+	priceService := &SimplePriceService{}
+
+	// Создаем PnL Tracker с правильными зависимостями
+	// В demo режиме передаем portfolioService как источник данных
+	pnlTracker := NewPnLTracker(nil, portfolioService, priceService, logger)
 
 	return &SimpleServiceContainer{
 		walletService:    NewSimpleWalletService(),
 		settingsService:  NewSimpleSettingsService(),
-		portfolioService: NewSimplePortfolioService(),
+		portfolioService: portfolioService,
+		tokenDataService: tokenDataService,
+		solPriceService:  solPriceService,
 		tokenSwapService: tokenSwapService,
 		pnlTracker:       pnlTracker,
 	}, nil
@@ -486,11 +499,18 @@ type SimplePortfolioService struct {
 }
 
 func NewSimplePortfolioService() PortfolioService {
-	return &SimplePortfolioService{
+	service := &SimplePortfolioService{
 		positions: make(map[int64][]*entities.TokenPosition),
 		nextID:    1,
 	}
+
+	// Позиции будут создаваться при реальных покупках
+
+	return service
 }
+
+// addDemoPositions добавляет тестовые позиции для демонстрации работы системы
+// addDemoPositions удалена - позиции создаются при реальных покупках
 
 func (s *SimplePortfolioService) OpenPosition(ctx context.Context, req OpenPositionRequest) (*entities.TokenPosition, error) {
 	s.mu.Lock()
@@ -578,8 +598,29 @@ func (s *SimplePortfolioService) GetPositions(ctx context.Context, walletID int6
 }
 
 func (s *SimplePortfolioService) GetPositionsByUser(ctx context.Context, userID int64) ([]*entities.TokenPosition, error) {
-	// В демо режиме не реализовано - нужна связь user -> wallets
-	return []*entities.TokenPosition{}, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Собираем все позиции пользователя из всех его кошельков
+	var allPositions []*entities.TokenPosition
+
+	// В простой реализации используем walletID как userID (для demo)
+	// В реальной системе нужно получить все кошельки пользователя
+	if positions, exists := s.positions[userID]; exists {
+		allPositions = append(allPositions, positions...)
+	}
+
+	// Также проверяем позиции по всем возможным кошелькам
+	// (в demo режиме может быть несколько кошельков с разными ID)
+	for walletID, positions := range s.positions {
+		if walletID != userID { // Избегаем дублирования
+			// В demo режиме добавляем все позиции
+			// В реальной системе здесь была бы проверка принадлежности кошелька пользователю
+			allPositions = append(allPositions, positions...)
+		}
+	}
+
+	return allPositions, nil
 }
 
 func (s *SimplePortfolioService) GetActivePositionByToken(ctx context.Context, walletID int64, tokenAddress string) (*entities.TokenPosition, error) {
@@ -617,16 +658,91 @@ func (s *SimplePortfolioService) BulkUpdatePrices(ctx context.Context, priceUpda
 }
 
 func (s *SimplePortfolioService) RefreshStalePositions(ctx context.Context, limit int) error {
-	// В демо режиме не реализовано
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var totalCleaned int
+
+	// Проходим по всем кошелькам и очищаем устаревшие позиции
+	for walletID, positions := range s.positions {
+		var cleanedCount int
+		for i, pos := range positions {
+			if pos != nil && pos.IsActive {
+				// Проверяем подозрительно большие количества токенов
+				// которые могли остаться после продажи
+				if pos.Amount > 1000 {
+					// Помечаем как неактивную
+					pos.IsActive = false
+					pos.UpdatedAt = time.Now()
+					s.positions[walletID][i] = pos
+					cleanedCount++
+					totalCleaned++
+
+					fmt.Printf("🧹 CLEANUP: Marked position %s (%.2f tokens) as inactive for wallet %d\n",
+						pos.TokenSymbol, pos.Amount, walletID)
+				}
+			}
+		}
+
+		if cleanedCount > 0 {
+			fmt.Printf("✅ CLEANUP: Cleaned %d positions for wallet %d\n", cleanedCount, walletID)
+		}
+	}
+
+	if totalCleaned > 0 {
+		fmt.Printf("🎯 CLEANUP SUMMARY: Total %d stale positions marked as inactive\n", totalCleaned)
+	}
+
 	return nil
 }
 
 func (s *SimplePortfolioService) CalculatePnL(ctx context.Context, walletID int64) (*PnLSummary, error) {
-	// В демо режиме возвращаем заглушку
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	positions := s.positions[walletID]
+	if positions == nil {
+		return &PnLSummary{
+			WalletID:             walletID,
+			TotalActivePositions: 0,
+			TotalPnLUSD:          0,
+		}, nil
+	}
+
+	var totalPnL float64 = 0
+	var activeCount int64 = 0
+
+	// Рассчитываем PnL в реальном времени для каждой позиции
+	for _, pos := range positions {
+		if pos != nil && pos.IsActive {
+			activeCount++
+
+			// Рассчитываем PnL: (текущая_цена - цена_входа) * количество
+			var currentPrice float64
+
+			// Для демо позиций используем фиксированные цены
+			if pos.TokenSymbol == "USDC" {
+				currentPrice = 0.9997 // Текущая цена USDC
+			} else if pos.TokenSymbol == "WSOL" {
+				currentPrice = 156.96 // Текущая цена WSOL
+			} else {
+				currentPrice = pos.EntryPrice // Fallback к цене входа
+			}
+
+			positionPnL := (currentPrice - pos.EntryPrice) * pos.Amount
+			totalPnL += positionPnL
+
+			fmt.Printf("🔍 PnL CALC: %s - Entry: $%.5f, Current: $%.5f, Amount: %.2f, PnL: $%.2f\n",
+				pos.TokenSymbol, pos.EntryPrice, currentPrice, pos.Amount, positionPnL)
+		}
+	}
+
+	fmt.Printf("🎯 TOTAL PnL: $%.2f from %d positions\n", totalPnL, activeCount)
+
 	return &PnLSummary{
 		WalletID:             walletID,
-		TotalActivePositions: 0,
-		TotalPnLUSD:          0,
+		TotalActivePositions: activeCount,
+		TotalPnLUSD:          totalPnL,
 	}, nil
 }
 
@@ -652,4 +768,125 @@ func (s *SimplePortfolioService) GetPortfolioSummary(ctx context.Context, userID
 		TotalValue:     0,
 		TotalPnL:       0,
 	}, nil
+}
+
+// CleanupStalePositions помечает позиции как неактивные если токенов нет в реальном кошельке
+func (s *SimplePortfolioService) CleanupStalePositions(ctx context.Context, walletID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	positions := s.positions[walletID]
+	if positions == nil {
+		return nil
+	}
+
+	var cleanedCount int
+	for i, pos := range positions {
+		if pos != nil && pos.IsActive {
+			// Проверяем подозрительно большие количества токенов
+			// которые могли остаться после продажи
+			if pos.Amount > 1000 {
+				// Помечаем как неактивную
+				pos.IsActive = false
+				pos.UpdatedAt = time.Now()
+				s.positions[walletID][i] = pos
+				cleanedCount++
+
+				fmt.Printf("🧹 CLEANUP: Marked position %s (%.2f tokens) as inactive due to suspicious amount\n",
+					pos.TokenSymbol, pos.Amount)
+			}
+		}
+	}
+
+	if cleanedCount > 0 {
+		fmt.Printf("✅ CLEANUP: Cleaned up %d stale positions for wallet %d\n", cleanedCount, walletID)
+	}
+
+	return nil
+}
+
+// CleanupSuspiciousPositions помечает позиции как неактивные если количество токенов подозрительно большое
+func (s *SimplePortfolioService) CleanupSuspiciousPositions(ctx context.Context, walletID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	positions := s.positions[walletID]
+	if positions == nil {
+		return nil
+	}
+
+	var cleanedCount int
+	for i, pos := range positions {
+		if pos != nil && pos.IsActive {
+			// Проверяем подозрительно большие количества токенов
+			// которые могли остаться после продажи
+			if pos.Amount > 1000 {
+				// Помечаем как неактивную
+				pos.IsActive = false
+				pos.UpdatedAt = time.Now()
+				s.positions[walletID][i] = pos
+				cleanedCount++
+
+				fmt.Printf("🧹 CLEANUP: Marked position %s (%.2f tokens) as inactive for wallet %d\n",
+					pos.TokenSymbol, pos.Amount, walletID)
+			}
+		}
+	}
+
+	if cleanedCount > 0 {
+		fmt.Printf("✅ CLEANUP: Cleaned %d suspicious positions for wallet %d\n", cleanedCount, walletID)
+	}
+
+	return nil
+}
+
+// CreateDemoPositions удалена - позиции создаются при реальных покупках
+
+// SimplePriceService - простая реализация PriceService для demo режима
+type SimplePriceService struct{}
+
+func (s *SimplePriceService) GetTokenPrice(ctx context.Context, tokenAddress string) (float64, error) {
+	// В demo режиме возвращаем фиксированную цену
+	// В реальном режиме это будет делегировано к TokenDataService
+	return 0.000001, nil // Примерная цена токена
+}
+
+func (s *SimplePriceService) GetMultipleTokenPrices(ctx context.Context, tokenAddresses []string) (map[string]float64, error) {
+	// В demo режиме возвращаем фиксированные цены
+	prices := make(map[string]float64)
+	for _, addr := range tokenAddresses {
+		prices[addr] = 0.000001
+	}
+	return prices, nil
+}
+
+// SimpleTokenDataService - простая реализация TokenDataService для demo режима
+type SimpleTokenDataService struct{}
+
+func (s *SimpleTokenDataService) GetTokenMetrics(ctx context.Context, address valueobjects.SolanaTokenAddress) (*valueobjects.TokenMetrics, error) {
+	// В demo режиме возвращаем базовые данные
+	// В реальном режиме это будет делегировано к DexScreener
+	return valueobjects.NewTokenMetrics(
+		address,                        // address
+		"Demo Token",                   // name
+		"DEMO",                         // symbol
+		decimal.NewFromFloat(0.000001), // price
+		decimal.NewFromFloat(1000),     // liquidity
+		decimal.NewFromFloat(1000),     // marketCap
+	), nil
+}
+
+// SimpleSolPriceService - простая реализация SolPriceService для demo режима
+type SimpleSolPriceService struct{}
+
+func (s *SimpleSolPriceService) GetCachedSolPrice(ctx context.Context) (*valueobjects.SolPrice, error) {
+	// В demo режиме возвращаем фиксированную цену SOL
+	// В реальном режиме это будет получено из DexScreener
+	solPrice := valueobjects.NewSolPrice(decimal.NewFromFloat(150.0))
+	return solPrice, nil
+}
+
+func (s *SimpleSolPriceService) RefreshSolPrice(ctx context.Context) error {
+	// В demo режиме ничего не делаем
+	return nil
 }

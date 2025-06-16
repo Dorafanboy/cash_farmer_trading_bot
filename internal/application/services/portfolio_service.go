@@ -35,6 +35,12 @@ type PortfolioService interface {
 	CalculatePnL(ctx context.Context, walletID int64) (*PnLSummary, error)
 	GetTopPositions(ctx context.Context, walletID int64, limit int) ([]*entities.TokenPosition, error)
 	GetPortfolioSummary(ctx context.Context, userID int64) (*PortfolioSummary, error)
+
+	// Cleanup
+	CleanupSuspiciousPositions(ctx context.Context, walletID int64) error
+
+	// Demo
+	// CreateDemoPositions удалена - позиции создаются при реальных покупках
 }
 
 // PortfolioServiceImpl implements PortfolioService
@@ -435,31 +441,70 @@ func (ps *PortfolioServiceImpl) RefreshStalePositions(ctx context.Context, limit
 func (ps *PortfolioServiceImpl) CalculatePnL(ctx context.Context, walletID int64) (*PnLSummary, error) {
 	log.Printf("Calculating P&L for wallet %d", walletID)
 
-	summary, err := ps.db.GetPositionsPnLSummary(ctx, walletID)
+	// Получаем активные позиции
+	positions, err := ps.GetPositions(ctx, walletID, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get P&L summary: %w", err)
+		return nil, fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// Calculate win rate
+	var totalPnL float64 = 0
+	var totalProfit float64 = 0
+	var totalLoss float64 = 0
+	var winningPositions int64 = 0
+	var losingPositions int64 = 0
+	activeCount := int64(len(positions))
+
+	// Рассчитываем PnL в реальном времени для каждой позиции
+	for _, pos := range positions {
+		if pos != nil && pos.IsActive {
+			// Рассчитываем PnL: (текущая_цена - цена_входа) * количество
+			var currentPrice float64 = pos.EntryPrice // Fallback к цене входа
+
+			// Получаем реальную цену через PriceService
+			if ps.priceService != nil {
+				if realPrice, err := ps.priceService.GetTokenPrice(ctx, pos.TokenAddress); err == nil && realPrice > 0 {
+					currentPrice = realPrice
+				}
+			}
+
+			positionPnL := (currentPrice - pos.EntryPrice) * pos.Amount
+			totalPnL += positionPnL
+
+			if positionPnL > 0 {
+				totalProfit += positionPnL
+				winningPositions++
+			} else if positionPnL < 0 {
+				totalLoss += positionPnL
+				losingPositions++
+			}
+
+			log.Printf("🔍 PnL CALC: %s - Entry: $%.5f, Current: $%.5f, Amount: %.2f, PnL: $%.2f",
+				pos.TokenSymbol, pos.EntryPrice, currentPrice, pos.Amount, positionPnL)
+		}
+	}
+
+	// Calculate win rate and average PnL
 	var winRate float64
-	if summary.TotalActivePositions > 0 {
-		winRate = (float64(summary.WinningPositions) / float64(summary.TotalActivePositions)) * 100
+	var averagePnL float64
+	if activeCount > 0 {
+		winRate = (float64(winningPositions) / float64(activeCount)) * 100
+		averagePnL = totalPnL / float64(activeCount)
 	}
 
 	result := &PnLSummary{
 		WalletID:             walletID,
-		TotalActivePositions: summary.TotalActivePositions,
-		TotalPnLUSD:          interfaceToFloat(summary.TotalPnlUsd),
-		AveragePnLUSD:        interfaceToFloat(summary.AvgPnlUsd),
-		TotalProfitUSD:       interfaceToFloat(summary.TotalProfitUsd),
-		TotalLossUSD:         interfaceToFloat(summary.TotalLossUsd),
-		WinningPositions:     summary.WinningPositions,
-		LosingPositions:      summary.LosingPositions,
+		TotalActivePositions: activeCount,
+		TotalPnLUSD:          totalPnL,
+		AveragePnLUSD:        averagePnL,
+		TotalProfitUSD:       totalProfit,
+		TotalLossUSD:         totalLoss,
+		WinningPositions:     winningPositions,
+		LosingPositions:      losingPositions,
 		WinRate:              winRate,
 	}
 
-	log.Printf("P&L calculated: wallet=%d, total_pnl=%.2f, positions=%d",
-		walletID, result.TotalPnLUSD, result.TotalActivePositions)
+	log.Printf("🎯 REAL-TIME PnL: wallet=%d, total_pnl=%.2f, positions=%d, wins=%d, losses=%d",
+		walletID, result.TotalPnLUSD, result.TotalActivePositions, winningPositions, losingPositions)
 	return result, nil
 }
 
@@ -567,3 +612,47 @@ func (ps *PortfolioServiceImpl) dbPositionToEntity(dbPos *sqlc.TokenPositions) *
 
 	return position
 }
+
+// CleanupSuspiciousPositions помечает позиции как неактивные если количество токенов подозрительно большое
+func (ps *PortfolioServiceImpl) CleanupSuspiciousPositions(ctx context.Context, walletID int64) error {
+	log.Printf("🧹 CLEANUP: Checking suspicious positions for wallet %d", walletID)
+
+	// Получаем все активные позиции кошелька
+	positions, err := ps.GetPositions(ctx, walletID, true)
+	if err != nil {
+		return fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	var cleanedCount int
+	for _, pos := range positions {
+		if pos != nil && pos.IsActive {
+			// Проверяем подозрительно большие количества токенов
+			// которые могли остаться после продажи
+			if pos.Amount > 1000 {
+				log.Printf("🚨 SUSPICIOUS: Position %s has %.2f tokens - marking as inactive",
+					pos.TokenSymbol, pos.Amount)
+
+				// Помечаем позицию как неактивную в базе данных
+				err := ps.ClosePosition(ctx, pos.ID, walletID)
+				if err != nil {
+					log.Printf("❌ Failed to close suspicious position %d: %v", pos.ID, err)
+				} else {
+					cleanedCount++
+					log.Printf("✅ Closed suspicious position %s (%.2f tokens)",
+						pos.TokenSymbol, pos.Amount)
+				}
+			}
+		}
+	}
+
+	if cleanedCount > 0 {
+		log.Printf("🎯 CLEANUP SUMMARY: Closed %d suspicious positions for wallet %d",
+			cleanedCount, walletID)
+	} else {
+		log.Printf("✅ CLEANUP: No suspicious positions found for wallet %d", walletID)
+	}
+
+	return nil
+}
+
+// CreateDemoPositions удалена - позиции создаются при реальных покупках

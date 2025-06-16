@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"cash-farmer/internal/application/services"
@@ -59,7 +60,7 @@ func (h *StartHandler) HandleStart(ctx context.Context, message *tgbotapi.Messag
 	}
 
 	// Build welcome message using the same function as refresh
-	text := h.buildWelcomeText(wallet.PublicKey, balance)
+	text := h.buildWelcomeText(userID, wallet.PublicKey, balance)
 
 	// Directly show main menu
 	keyboard := h.uiBuilder.BuildMainMenuKeyboard()
@@ -209,7 +210,7 @@ func (h *StartHandler) sendWelcomeMessage(ctx context.Context, userID int64, wal
 		h.api.Send(deleteMsg) // Ignore errors for message deletion
 	}
 
-	text := h.buildWelcomeText(walletAddress, balance)
+	text := h.buildWelcomeText(userID, walletAddress, balance)
 	keyboard := h.uiBuilder.BuildMainMenuKeyboard()
 
 	msg := tgbotapi.NewMessage(userID, text)
@@ -227,7 +228,8 @@ func (h *StartHandler) sendWelcomeMessage(ctx context.Context, userID int64, wal
 }
 
 func (h *StartHandler) editWelcomeMessage(ctx context.Context, query *tgbotapi.CallbackQuery, walletAddress string, balance float64) error {
-	text := h.buildWelcomeText(walletAddress, balance)
+	userID := query.From.ID
+	text := h.buildWelcomeText(userID, walletAddress, balance)
 	keyboard := h.uiBuilder.BuildMainMenuKeyboard()
 
 	edit := tgbotapi.NewEditMessageText(query.Message.Chat.ID, query.Message.MessageID, text)
@@ -238,7 +240,7 @@ func (h *StartHandler) editWelcomeMessage(ctx context.Context, query *tgbotapi.C
 	return err
 }
 
-func (h *StartHandler) buildWelcomeText(walletAddress string, balance float64) string {
+func (h *StartHandler) buildWelcomeText(userID int64, walletAddress string, balance float64) string {
 	// Calculate USD value using real SOL price from DexScreener
 	usdValue := balance * 100 // Fallback: 1 SOL = $100
 
@@ -262,10 +264,63 @@ func (h *StartHandler) buildWelcomeText(walletAddress string, balance float64) s
 		}
 	}
 
-	// 🔥 REAL PnL: Use rocket emoji instead of hardcoded $2.47
-	// Real PnL calculation is implemented in token interface (getPnLString function)
-	// For /start menu, we use simple emoji to keep interface clean
-	var pnlString string = "🚀"
+	// 🔥 REAL PnL: Calculate real PnL using PortfolioService
+	var pnlString string = "🚀" // fallback
+
+	// Get user's primary wallet for PnL calculation
+	wallets, err := h.services.GetWalletService().GetWallets(ctx, userID)
+	if err == nil && len(wallets) > 0 {
+		var primaryWallet *services.SimpleWallet
+		for _, wallet := range wallets {
+			if wallet.IsDefault && wallet.PublicKey == walletAddress {
+				primaryWallet = &wallet
+				break
+			}
+		}
+
+		if primaryWallet != nil {
+			// Parse wallet ID to int64
+			if walletIDInt, parseErr := strconv.ParseInt(primaryWallet.ID, 10, 64); parseErr == nil {
+				// Use PortfolioService to calculate PnL
+				portfolioService := h.services.GetPortfolioService()
+				if portfolioService != nil {
+					if pnlSummary, pnlErr := portfolioService.CalculatePnL(ctx, walletIDInt); pnlErr == nil && pnlSummary != nil {
+						pnlValue := pnlSummary.TotalPnLUSD
+						if pnlValue != 0 {
+							// Рассчитываем процент PnL
+							// Получаем позиции для расчета общей стоимости входа
+							if positions, posErr := portfolioService.GetPositions(ctx, walletIDInt, true); posErr == nil && len(positions) > 0 {
+								var totalEntryValue float64 = 0.0
+								for _, position := range positions {
+									if position != nil && position.IsActive {
+										totalEntryValue += position.EntryPrice * position.Amount
+									}
+								}
+
+								var pnlPercent float64 = 0.0
+								if totalEntryValue > 0 {
+									pnlPercent = (pnlValue / totalEntryValue) * 100
+								}
+
+								if pnlValue > 0 {
+									pnlString = fmt.Sprintf("📈 +$%.2f (+%.1f%%)", pnlValue, pnlPercent)
+								} else {
+									pnlString = fmt.Sprintf("📉 $%.2f (%.1f%%)", pnlValue, pnlPercent)
+								}
+							} else {
+								// Fallback без процентов
+								if pnlValue > 0 {
+									pnlString = fmt.Sprintf("📈 +$%.2f", pnlValue)
+								} else {
+									pnlString = fmt.Sprintf("📉 $%.2f", pnlValue)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Add deposit warning for zero balance
 	var depositWarning string
