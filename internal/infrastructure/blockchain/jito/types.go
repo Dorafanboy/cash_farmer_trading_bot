@@ -1,9 +1,10 @@
 package jito
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/goccy/go-json"
 )
 
 // BundleStatus статус Jito bundle

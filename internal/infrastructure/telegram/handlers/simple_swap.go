@@ -1,14 +1,10 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,6 +20,8 @@ import (
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 var (
@@ -43,7 +41,7 @@ var (
 		"https://tokyo.mainnet.block-engine.jito.wtf/api/v1",
 	}
 	simpleBlockhash       atomic.Value
-	simpleHttpCli         = &http.Client{Timeout: 15 * time.Second}
+	simpleFastHttpCli     = &fasthttp.Client{ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second}
 	simpleLastRequestTime atomic.Value
 )
 
@@ -839,21 +837,26 @@ func (h *TradingHandler) simpleGetTipFloor() (float64, error) {
 
 	err := h.simpleRetryWithBackoff(func() error {
 		h.simpleEnforceRateLimit()
-		resp, err := simpleHttpCli.Get("https://bundles.jito.wtf/api/v1/bundles/tip_floor")
+
+		// Используем fasthttp правильно
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.SetRequestURI("https://bundles.jito.wtf/api/v1/bundles/tip_floor")
+		req.Header.SetMethod(fasthttp.MethodGet)
+
+		err := simpleFastHttpCli.DoTimeout(req, resp, 15*time.Second)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode == 429 {
+		if resp.StatusCode() == 429 {
 			return fmt.Errorf("rate limited (429)")
 		}
 
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-
+		body := resp.Body()
 		var tipData []struct {
 			LandedTips75thPercentile float64 `json:"landed_tips_75th_percentile"`
 		}
@@ -882,13 +885,21 @@ func (h *TradingHandler) simpleGetSwapTransaction(ctx context.Context, inputMint
 	quoteURL := fmt.Sprintf("https://quote-api.jup.ag/v6/quote?inputMint=%s&outputMint=%s&amount=%d&slippageBps=%d",
 		inputMint, outputMint, amountLamports, int(userSettings.BuySlippage*100))
 
-	resp, err := simpleHttpCli.Get(quoteURL)
+	// GET quote
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(quoteURL)
+	req.Header.SetMethod(fasthttp.MethodGet)
+
+	err := simpleFastHttpCli.DoTimeout(req, resp, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	respBytes, _ := ioutil.ReadAll(resp.Body)
+	respBytes := resp.Body()
 	var quoteResp map[string]interface{}
 	_ = json.Unmarshal(respBytes, &quoteResp)
 
@@ -903,12 +914,24 @@ func (h *TradingHandler) simpleGetSwapTransaction(ctx context.Context, inputMint
 	}
 
 	bodyData, _ := json.Marshal(swapReq)
-	swapRequest, _ := http.NewRequest("POST", "https://quote-api.jup.ag/v6/swap", bytes.NewBuffer(bodyData))
-	swapRequest.Header.Set("Content-Type", "application/json")
-	swapResp, _ := simpleHttpCli.Do(swapRequest.WithContext(ctx))
-	defer swapResp.Body.Close()
 
-	respBytes, _ = ioutil.ReadAll(swapResp.Body)
+	// POST swap
+	swapReq2 := fasthttp.AcquireRequest()
+	swapResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(swapReq2)
+	defer fasthttp.ReleaseResponse(swapResp)
+
+	swapReq2.SetRequestURI("https://quote-api.jup.ag/v6/swap")
+	swapReq2.Header.SetMethod(fasthttp.MethodPost)
+	swapReq2.Header.SetContentType("application/json")
+	swapReq2.SetBody(bodyData)
+
+	err = simpleFastHttpCli.DoTimeout(swapReq2, swapResp, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	respBytes = swapResp.Body()
 	var swapData struct {
 		SwapTransaction string `json:"swapTransaction"`
 	}
@@ -1142,13 +1165,21 @@ func (h *TradingHandler) simpleGetSellSwapTransaction(ctx context.Context, input
 	quoteURL := fmt.Sprintf("https://quote-api.jup.ag/v6/quote?inputMint=%s&outputMint=%s&amount=%d&slippageBps=%d",
 		inputMint, outputMint, amountTokens, int(userSettings.SellSlippage*100))
 
-	resp, err := simpleHttpCli.Get(quoteURL)
+	// GET quote
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(quoteURL)
+	req.Header.SetMethod(fasthttp.MethodGet)
+
+	err := simpleFastHttpCli.DoTimeout(req, resp, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	respBytes, _ := ioutil.ReadAll(resp.Body)
+	respBytes := resp.Body()
 	var quoteResp map[string]interface{}
 	_ = json.Unmarshal(respBytes, &quoteResp)
 
@@ -1163,12 +1194,24 @@ func (h *TradingHandler) simpleGetSellSwapTransaction(ctx context.Context, input
 	}
 
 	bodyData, _ := json.Marshal(swapReq)
-	swapRequest, _ := http.NewRequest("POST", "https://quote-api.jup.ag/v6/swap", bytes.NewBuffer(bodyData))
-	swapRequest.Header.Set("Content-Type", "application/json")
-	swapResp, _ := simpleHttpCli.Do(swapRequest.WithContext(ctx))
-	defer swapResp.Body.Close()
 
-	respBytes, _ = ioutil.ReadAll(swapResp.Body)
+	// POST swap
+	swapReq2 := fasthttp.AcquireRequest()
+	swapResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(swapReq2)
+	defer fasthttp.ReleaseResponse(swapResp)
+
+	swapReq2.SetRequestURI("https://quote-api.jup.ag/v6/swap")
+	swapReq2.Header.SetMethod(fasthttp.MethodPost)
+	swapReq2.Header.SetContentType("application/json")
+	swapReq2.SetBody(bodyData)
+
+	err = simpleFastHttpCli.DoTimeout(swapReq2, swapResp, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	respBytes = swapResp.Body()
 	var swapData struct {
 		SwapTransaction string `json:"swapTransaction"`
 	}

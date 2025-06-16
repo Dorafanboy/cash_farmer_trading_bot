@@ -2,16 +2,14 @@ package jito
 
 import (
 	"context"
-	"net/http"
 	"time"
 )
 
 // LegacyJitoClient полностью имитирует api.JitoClient но использует EnhancedJitoClient внутри
 // Это обеспечивает полную backward compatibility
 type LegacyJitoClient struct {
-	enhanced   JitoClientInterface
-	httpClient *http.Client // Совместимость с api.JitoClient
-	rpcURL     string       // Совместимость с api.JitoClient
+	enhanced JitoClientInterface
+	rpcURL   string // Совместимость с api.JitoClient
 }
 
 // NewJitoClient создает новый legacy compatible Jito клиент
@@ -26,10 +24,7 @@ func NewJitoClient(rpcURL string) *LegacyJitoClient {
 
 	return &LegacyJitoClient{
 		enhanced: enhanced,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		rpcURL: rpcURL,
+		rpcURL:   rpcURL,
 	}
 }
 
@@ -37,10 +32,7 @@ func NewJitoClient(rpcURL string) *LegacyJitoClient {
 func NewJitoClientFromEnhanced(enhanced JitoClientInterface, rpcURL string) *LegacyJitoClient {
 	return &LegacyJitoClient{
 		enhanced: enhanced,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		rpcURL: rpcURL,
+		rpcURL:   rpcURL,
 	}
 }
 

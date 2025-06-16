@@ -1,9 +1,10 @@
 package jupiter
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/goccy/go-json"
 )
 
 // QuoteRequest параметры для получения котировки

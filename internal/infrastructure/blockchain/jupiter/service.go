@@ -1,16 +1,15 @@
 package jupiter
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"cash-farmer/internal/infrastructure/blockchain/common"
 	"cash-farmer/internal/infrastructure/blockchain/config"
+
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 // JupiterService интерфейс для работы с Jupiter API
@@ -31,7 +30,7 @@ type JupiterService interface {
 // jupiterService реализация JupiterService
 type jupiterService struct {
 	config     *config.BlockchainConfig
-	httpClient *http.Client
+	httpClient *fasthttp.Client
 	baseURL    string
 }
 
@@ -40,8 +39,9 @@ func NewJupiterService(cfg *config.BlockchainConfig) JupiterService {
 	return &jupiterService{
 		config:  cfg,
 		baseURL: cfg.JupiterBaseURL,
-		httpClient: &http.Client{
-			Timeout: cfg.RequestTimeout,
+		httpClient: &fasthttp.Client{
+			ReadTimeout:  cfg.RequestTimeout,
+			WriteTimeout: cfg.RequestTimeout,
 		},
 	}
 }
@@ -50,27 +50,27 @@ func NewJupiterService(cfg *config.BlockchainConfig) JupiterService {
 func (j *jupiterService) GetQuote(ctx context.Context, params QuoteRequest) (*QuoteResponse, error) {
 	url := CreateQuoteURL(j.baseURL, params)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
-	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.Set("Content-Type", "application/json")
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodGet)
+	req.Header.SetContentType("application/json")
 
-	resp, err := j.httpClient.Do(req)
+	err := j.httpClient.DoTimeout(req, resp, j.config.RequestTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка HTTP запроса: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения ответа: %w", err)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("Jupiter Quote API ошибка %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Jupiter Quote API ошибка %d: %s", resp.StatusCode, string(body))
-	}
+	// Копируем тело ответа
+	body := make([]byte, len(resp.Body()))
+	copy(body, resp.Body())
 
 	quote, err := ParseQuoteResponse(body)
 	if err != nil {
@@ -102,27 +102,28 @@ func (j *jupiterService) GetSwapTransaction(ctx context.Context, request SwapReq
 		return nil, fmt.Errorf("ошибка маршалинга запроса: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
-	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.Set("Content-Type", "application/json")
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.Header.SetContentType("application/json")
+	req.SetBody(requestBody)
 
-	resp, err := j.httpClient.Do(req)
+	err = j.httpClient.DoTimeout(req, resp, j.config.RequestTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка HTTP запроса: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения ответа: %w", err)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("Jupiter Swap API ошибка %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Jupiter Swap API ошибка %d: %s", resp.StatusCode, string(body))
-	}
+	// Копируем тело ответа
+	body := make([]byte, len(resp.Body()))
+	copy(body, resp.Body())
 
 	swapResponse, err := ParseSwapResponse(body)
 	if err != nil {

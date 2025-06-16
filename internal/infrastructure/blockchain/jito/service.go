@@ -1,17 +1,16 @@
 package jito
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"sync"
 	"time"
 
 	"cash-farmer/internal/infrastructure/blockchain/common"
 	"cash-farmer/internal/infrastructure/blockchain/config"
+
+	"github.com/goccy/go-json"
+	"github.com/valyala/fasthttp"
 )
 
 // JitoService интерфейс для работы с Jito
@@ -32,7 +31,7 @@ type JitoService interface {
 // jitoService реализация JitoService
 type jitoService struct {
 	config     *config.BlockchainConfig
-	httpClient *http.Client
+	httpClient *fasthttp.Client
 	endpoints  []string
 	mu         sync.RWMutex
 }
@@ -42,8 +41,9 @@ func NewJitoService(cfg *config.BlockchainConfig) JitoService {
 	return &jitoService{
 		config:    cfg,
 		endpoints: cfg.GetJitoEndpoints(),
-		httpClient: &http.Client{
-			Timeout: cfg.RequestTimeout,
+		httpClient: &fasthttp.Client{
+			ReadTimeout:  cfg.RequestTimeout,
+			WriteTimeout: cfg.RequestTimeout,
 		},
 	}
 }
@@ -320,27 +320,28 @@ func (j *jitoService) getBundleStatusFromEndpoint(ctx context.Context, endpoint 
 func (j *jitoService) makeHTTPRequest(ctx context.Context, endpoint string, requestBody []byte) ([]byte, error) {
 	url := endpoint + "/bundles"
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
-	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.Set("Content-Type", "application/json")
+	req.SetRequestURI(url)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.Header.SetContentType("application/json")
+	req.SetBody(requestBody)
 
-	resp, err := j.httpClient.Do(req)
+	err := j.httpClient.DoTimeout(req, resp, j.config.RequestTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка HTTP запроса к %s: %w", endpoint, err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d от %s", resp.StatusCode, endpoint)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("HTTP %d от %s", resp.StatusCode(), endpoint)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения ответа: %w", err)
-	}
+	// Копируем тело ответа, так как оно освобождается после return
+	body := make([]byte, len(resp.Body()))
+	copy(body, resp.Body())
 
 	return body, nil
 }
