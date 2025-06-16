@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"cash-farmer/internal/infrastructure/database/sqlc"
+	
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Config holds database configuration

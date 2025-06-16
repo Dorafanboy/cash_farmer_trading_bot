@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"golang.org/x/time/rate"
-
 	"cash-farmer/internal/domain/valueobjects"
+
+	"golang.org/x/time/rate"
 )
 
 // DexscreenerClient handles communication with Dexscreener API
@@ -121,17 +121,14 @@ func (d *DexscreenerClient) GetTokenMetrics(
 		}
 	}
 
-	// Use marketCap from API instead of FDV or custom calculation
 	marketCapValue := bestPair.MarketCap
 
-	// Fallback to FDV if MarketCap is 0, and SOL special handling as last resort
 	if marketCapValue == 0 {
 		marketCapValue = bestPair.FDV
 		isSOLToken := address.Value() == "So11111111111111111111111111111111111111112"
 
 		if isSOLToken && marketCapValue == 0 {
-			// For SOL, calculate approximate market cap using circulating supply
-			solCirculatingSupply := 400000000.0 // 400 million SOL
+			solCirculatingSupply := 400000000.0
 			marketCapValue = priceFloat * solCirculatingSupply
 			fmt.Printf("🔄 SOL SPECIAL HANDLING: Calculated market cap = $%.2fB\n", marketCapValue/1000000000)
 		}

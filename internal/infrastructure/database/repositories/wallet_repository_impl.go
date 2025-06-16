@@ -150,8 +150,6 @@ func (r *WalletRepositoryImpl) Count(ctx context.Context, userID int64) (int, er
 	return int(count), err
 }
 
-// Helper conversion functions for different Row types
-
 // convertFromFindWalletByIDRow converts FindWalletByIDRow to entities.Wallet
 func (r *WalletRepositoryImpl) convertFromFindWalletByIDRow(row sqlc.FindWalletByIDRow) (*entities.Wallet, error) {
 	publicKey, err := valueobjects.NewSolanaAddress(row.PublicKey)

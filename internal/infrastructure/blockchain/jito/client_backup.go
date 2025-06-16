@@ -17,7 +17,6 @@ type LegacyJitoClient struct {
 // NewJitoClient создает новый legacy compatible Jito клиент
 // Эта функция заменяет api.NewJitoClient с enhanced функциональностью
 func NewJitoClient(rpcURL string) *LegacyJitoClient {
-	// Создаем enhanced клиент с конфигом по умолчанию
 	config := &Config{
 		BaseURL: rpcURL,
 		UUID:    "",
@@ -44,8 +43,6 @@ func NewJitoClientFromEnhanced(enhanced JitoClientInterface, rpcURL string) *Leg
 		rpcURL: rpcURL,
 	}
 }
-
-// ВСЕ МЕТОДЫ ПОЛНОСТЬЮ СОВМЕСТИМЫ С api.JitoClient
 
 // SendBundle отправляет bundle транзакций в Jito
 func (c *LegacyJitoClient) SendBundle(ctx context.Context, transactions []string) (*JitoBundleResult, error) {
@@ -182,12 +179,10 @@ func (c *LegacyJitoClient) SendTransaction(ctx context.Context, txData string, b
 
 // GetCapabilities возвращает возможности клиента (enhanced фича)
 func (c *LegacyJitoClient) GetCapabilities() ClientCapabilities {
-	// Прямой вызов метода если он есть в enhanced клиенте
 	if enhancedClient, ok := c.enhanced.(*EnhancedJitoClient); ok {
 		return enhancedClient.GetCapabilities()
 	}
 
-	// Возвращаем дефолтные возможности если метод недоступен
 	return ClientCapabilities{
 		SupportsUUIDAuth:   true,
 		SupportsBundleOnly: true,

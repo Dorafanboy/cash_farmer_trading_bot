@@ -183,7 +183,6 @@ func (s *SolanaClient) GetTokenBalance(ctx context.Context, owner string, mint s
 		return 0, 0, nil // No token accounts found
 	}
 
-	// Use the first account (user might have multiple accounts for same token)
 	account := accounts[0]
 	amountStr := account.Account.Data.Parsed.Info.TokenAmount.Amount
 	decimals := account.Account.Data.Parsed.Info.TokenAmount.Decimals
@@ -203,7 +202,6 @@ func (s *SolanaClient) SendTransaction(ctx context.Context, transaction string, 
 	if options != nil {
 		params = append(params, options)
 	} else {
-		// Default options
 		params = append(params, map[string]interface{}{
 			"encoding":            "base64",
 			"skipPreflight":       false,
@@ -350,7 +348,7 @@ func (s *SolanaClient) makeRPCCall(ctx context.Context, req SolanaRPCRequest, re
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Solana RPC request failed with status %d", resp.StatusCode)
+		return fmt.Errorf("solana RPC request failed with status %d", resp.StatusCode)
 	}
 
 	var rpcResp SolanaRPCResponse
@@ -359,7 +357,7 @@ func (s *SolanaClient) makeRPCCall(ctx context.Context, req SolanaRPCRequest, re
 	}
 
 	if rpcResp.Error != nil {
-		return fmt.Errorf("Solana RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return fmt.Errorf("solana RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 
 	if result != nil && rpcResp.Result != nil {

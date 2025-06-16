@@ -1300,6 +1300,14 @@ func (h *TradingHandler) executeModularSwap(ctx context.Context, query *tgbotapi
 	h.logger.Printf("  - Price Impact: %s", result.PriceImpact)
 	h.logger.Printf("  - Duration: %v", result.Duration)
 
+	// 📝 ВАЖНО: Записываем событие покупки для PnL трекинга
+	h.logger.Printf("📝 Recording buy event for PnL tracking...")
+	h.recordBuyEvent(ctx, userID, defaultWallet, tokenAddress, amount, result)
+
+	// 📊 ВАЖНО: Обновляем позицию в PortfolioService
+	h.logger.Printf("📊 Creating position in PortfolioService...")
+	h.createPositionAfterBuy(ctx, userID, defaultWallet, tokenAddress, amount, result)
+
 	// Показываем результат
 	swapDetails := h.createSwapDetailsStub(tokenAddress, amount, result.TransactionHash)
 	h.finalizeSwap(query, true, swapDetails, "")
@@ -1611,30 +1619,64 @@ func (h *TradingHandler) recordBuyEvent(ctx context.Context, userID int64, walle
 		tokenSymbol = tokenAddress[:4] + "..." + tokenAddress[len(tokenAddress)-4:]
 	}
 
-	// Создаем событие покупки
+	// Извлекаем реальные данные из result
+	var tokenAmount float64 = 0
+	var entryPrice float64 = 0
+	var transactionID string = "unknown"
+
+	// Извлекаем данные из SwapResult
+	if swapResult, ok := result.(interface {
+		TransactionHash() string
+		OutputAmount() string
+	}); ok {
+		// Получаем transaction hash
+		if hash := swapResult.TransactionHash(); hash != "" {
+			transactionID = hash
+		}
+
+		// Парсим количество токенов
+		if outputAmountStr := swapResult.OutputAmount(); outputAmountStr != "" {
+			if parsedAmount, parseErr := strconv.ParseFloat(outputAmountStr, 64); parseErr == nil {
+				tokenAmount = parsedAmount
+				// Рассчитываем entry price: SOL потрачено / количество токенов
+				if tokenAmount > 0 {
+					entryPrice = solAmount / tokenAmount
+				}
+			}
+		}
+	}
+
+	// Если не удалось извлечь данные из result, получаем цену через TokenDataService
+	if entryPrice == 0 {
+		tokenDataService := h.services.GetTokenDataService()
+		if tokenDataService != nil {
+			if tokenAddr, err := valueobjects.NewSolanaTokenAddress(tokenAddress); err == nil {
+				if tokenMetrics, err := tokenDataService.GetTokenMetrics(context.Background(), *tokenAddr); err == nil && tokenMetrics != nil {
+					if priceFloat, _ := tokenMetrics.PriceUSD().Float64(); priceFloat > 0 {
+						entryPrice = priceFloat
+						// Если не удалось извлечь количество из result, рассчитываем
+						if tokenAmount == 0 {
+							tokenAmount = solAmount / entryPrice
+						}
+					}
+				}
+			}
+		}
+	}
+
+	h.logger.Printf("📊 Buy event data: TokenAmount=%.6f, EntryPrice=%.8f, TxID=%s", tokenAmount, entryPrice, transactionID)
+
+	// Создаем событие покупки с реальными данными
 	buyEvent := services.BuyEvent{
 		UserID:        userID,
 		WalletID:      walletIDInt,
 		TokenAddress:  tokenAddress,
 		TokenSymbol:   tokenSymbol,
-		Amount:        solAmount, // SOL потрачено
-		TokenAmount:   0,         // TODO: Получить из result
-		EntryPrice:    0,         // TODO: Рассчитать entry price
-		TransactionID: "unknown", // TODO: Получить из result
+		Amount:        solAmount,     // SOL потрачено
+		TokenAmount:   tokenAmount,   // Количество токенов получено
+		EntryPrice:    entryPrice,    // Цена входа
+		TransactionID: transactionID, // Hash транзакции
 		Timestamp:     time.Now(),
-	}
-
-	// TODO: Извлечь реальные данные из result
-	// В зависимости от типа result (trading.SwapResult или другой)
-	if swapResult, ok := result.(interface {
-		TransactionHash() string
-		OutputAmount() string
-	}); ok {
-		// Если у result есть нужные методы
-		if hash := swapResult.TransactionHash(); hash != "" {
-			buyEvent.TransactionID = hash
-		}
-		// TODO: Парсить OutputAmount для получения TokenAmount
 	}
 
 	// Асинхронно записываем событие (не блокируем UI)
@@ -1646,6 +1688,101 @@ func (h *TradingHandler) recordBuyEvent(ctx context.Context, userID int64, walle
 			h.logger.Printf("✅ PnL: Buy event recorded successfully")
 		}
 	}()
+}
+
+// createPositionAfterBuy создает позицию в PortfolioService после успешной покупки
+func (h *TradingHandler) createPositionAfterBuy(ctx context.Context, userID int64, wallet *services.SimpleWallet, tokenAddress string, solAmount float64, result interface{}) {
+	h.logger.Printf("📊 Creating position after buy - User: %d, Token: %s, SOL: %.6f", userID, tokenAddress, solAmount)
+
+	// Получаем PortfolioService
+	portfolioService := h.services.GetPortfolioService()
+	if portfolioService == nil {
+		h.logger.Printf("❌ PortfolioService not available")
+		return
+	}
+
+	// Конвертируем wallet ID в int64
+	walletIDInt, err := strconv.ParseInt(wallet.ID, 10, 64)
+	if err != nil {
+		h.logger.Printf("❌ Failed to parse wallet ID: %v", err)
+		return
+	}
+
+	// Получаем текущую цену токена и символ
+	var tokenPrice float64 = 0.000001 // Заглушка
+	var tokenSymbol string = "UNKNOWN"
+	var tokenAmount float64 = 0
+
+	// Пытаемся извлечь количество токенов из result
+	if swapResult, ok := result.(interface {
+		OutputAmount() string
+	}); ok {
+		if outputAmountStr := swapResult.OutputAmount(); outputAmountStr != "" {
+			// Парсим количество токенов из строки
+			if parsedAmount, parseErr := strconv.ParseFloat(outputAmountStr, 64); parseErr == nil {
+				tokenAmount = parsedAmount
+				h.logger.Printf("📊 Extracted token amount from result: %.6f", tokenAmount)
+			}
+		}
+	}
+
+	// Получаем данные токена через TokenDataService
+	tokenDataService := h.services.GetTokenDataService()
+	if tokenDataService != nil {
+		if tokenAddr, err := valueobjects.NewSolanaTokenAddress(tokenAddress); err == nil {
+			if tokenMetrics, err := tokenDataService.GetTokenMetrics(ctx, *tokenAddr); err == nil && tokenMetrics != nil {
+				tokenSymbol = tokenMetrics.Symbol()
+				if priceFloat, _ := tokenMetrics.PriceUSD().Float64(); priceFloat > 0 {
+					tokenPrice = priceFloat
+					// Если не удалось извлечь количество из result, рассчитываем
+					if tokenAmount == 0 {
+						tokenAmount = solAmount / tokenPrice
+					}
+				}
+			}
+		}
+	}
+
+	h.logger.Printf("📊 Position data: Symbol=%s, Price=%.8f, Amount=%.6f", tokenSymbol, tokenPrice, tokenAmount)
+
+	// Проверяем существует ли уже позиция для этого токена
+	existingPosition, err := portfolioService.GetActivePositionByToken(ctx, walletIDInt, tokenAddress)
+	if err != nil && err.Error() != "position not found" {
+		h.logger.Printf("❌ Error checking existing position: %v", err)
+		return
+	}
+
+	if existingPosition != nil {
+		// Позиция уже существует - обновляем количество (добавляем к существующему)
+		newAmount := existingPosition.Amount + tokenAmount
+		h.logger.Printf("📊 Updating existing position: %.6f + %.6f = %.6f",
+			existingPosition.Amount, tokenAmount, newAmount)
+
+		err = portfolioService.UpdatePositionAmount(ctx, existingPosition.ID, newAmount)
+		if err != nil {
+			h.logger.Printf("❌ Failed to update position amount: %v", err)
+		} else {
+			h.logger.Printf("✅ Position amount updated successfully")
+		}
+	} else {
+		// Создаем новую позицию
+		h.logger.Printf("📊 Creating new position for token %s", tokenSymbol)
+
+		openPositionReq := services.OpenPositionRequest{
+			WalletID:     walletIDInt,
+			TokenAddress: tokenAddress,
+			TokenSymbol:  tokenSymbol,
+			Amount:       tokenAmount,
+			EntryPrice:   tokenPrice,
+		}
+
+		_, err = portfolioService.OpenPosition(ctx, openPositionReq)
+		if err != nil {
+			h.logger.Printf("❌ Failed to create new position: %v", err)
+		} else {
+			h.logger.Printf("✅ New position created successfully")
+		}
+	}
 }
 
 // PortfolioHandler - реальная реализация

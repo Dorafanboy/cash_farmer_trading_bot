@@ -1,11 +1,12 @@
 package services
 
 import (
-	"cash-farmer/internal/domain/entities"
 	"context"
 	"fmt"
 	"log"
 	"strconv"
+
+	"cash-farmer/internal/domain/entities"
 )
 
 // ServiceContainerAdapter adapts ServiceContainer to SimpleServiceContainer interface
@@ -26,7 +27,7 @@ func NewServiceContainerAdapter(container *ServiceContainer) *SimpleServiceConta
 		solPriceService:  container.GetSolPriceService(),
 		tokenSwapService: nil, // nil означает что GetTokenSwapService должен использовать адаптер
 		adapter:          adapter,
-		mainContainer:    container, // NEW: Передаем полный контейнер с модульными сервисами
+		mainContainer:    container,
 	}
 }
 
@@ -36,13 +37,11 @@ type WalletServiceAdapter struct {
 }
 
 func (w *WalletServiceAdapter) GetWallets(ctx context.Context, userID int64) ([]SimpleWallet, error) {
-	// Get real wallets
 	realWallets, err := w.serviceAdapter.container.GetWalletService().GetWallets(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to SimpleWallet format
 	simpleWallets := make([]SimpleWallet, 0, len(realWallets))
 	for _, realWallet := range realWallets {
 		simpleWallet := SimpleWallet{
@@ -56,18 +55,15 @@ func (w *WalletServiceAdapter) GetWallets(ctx context.Context, userID int64) ([]
 		simpleWallets = append(simpleWallets, simpleWallet)
 	}
 
-	// Return wallets as-is, let ensureUserWallet handle creation
 	return simpleWallets, nil
 }
 
 func (w *WalletServiceAdapter) CreateWallet(ctx context.Context, userID int64, name string) (*SimpleWallet, error) {
-	// Use GenerateWallet to create a new wallet with real Solana keypair
 	realWallet, err := w.serviceAdapter.container.GetWalletService().GenerateWallet(ctx, userID, name)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to SimpleWallet format
 	simpleWallet := &SimpleWallet{
 		ID:        fmt.Sprintf("%d", realWallet.ID),
 		UserID:    realWallet.UserID,
@@ -81,40 +77,33 @@ func (w *WalletServiceAdapter) CreateWallet(ctx context.Context, userID int64, n
 }
 
 func (w *WalletServiceAdapter) GetBalance(ctx context.Context, walletID string) (float64, error) {
-	// Convert string ID to int64
 	walletIDInt, err := strconv.ParseInt(walletID, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid wallet ID: %w", err)
 	}
 
-	// Get real balance information
 	balanceInfo, err := w.serviceAdapter.container.GetWalletService().GetBalance(ctx, walletIDInt)
 	if err != nil {
-		// If balance service fails, return 0 instead of error for now
 		log.Printf("Warning: failed to get balance for wallet %d: %v", walletIDInt, err)
 		return 0, nil
 	}
 
-	// Check if balanceInfo is nil
 	if balanceInfo == nil {
 		log.Printf("Warning: balance info is nil for wallet %d", walletIDInt)
 		return 0, nil
 	}
 
-	// Convert lamports to SOL (1 SOL = 1e9 lamports)
 	solBalance := float64(balanceInfo.SOLBalance) / 1e9
 
 	return solBalance, nil
 }
 
 func (w *WalletServiceAdapter) ExportPrivateKey(ctx context.Context, userID int64, walletID string) (string, error) {
-	// Convert string ID to int64
 	walletIDInt, err := strconv.ParseInt(walletID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid wallet ID: %w", err)
 	}
 
-	// Now we have both userID and walletID - use real WalletService!
 	privateKey, err := w.serviceAdapter.container.GetWalletService().ExportPrivateKey(ctx, userID, walletIDInt)
 	if err != nil {
 		return "", fmt.Errorf("failed to export private key from database: %w", err)
@@ -124,13 +113,11 @@ func (w *WalletServiceAdapter) ExportPrivateKey(ctx context.Context, userID int6
 }
 
 func (w *WalletServiceAdapter) SetPrimaryWallet(ctx context.Context, userID int64, walletID string) error {
-	// Convert string ID to int64
 	walletIDInt, err := strconv.ParseInt(walletID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid wallet ID: %w", err)
 	}
 
-	// Use real wallet service to set default wallet (primary = default)
 	err = w.serviceAdapter.container.GetWalletService().SetDefaultWallet(ctx, userID, walletIDInt)
 	if err != nil {
 		return fmt.Errorf("failed to set default wallet: %w", err)
@@ -140,13 +127,11 @@ func (w *WalletServiceAdapter) SetPrimaryWallet(ctx context.Context, userID int6
 }
 
 func (w *WalletServiceAdapter) DeleteWallet(ctx context.Context, userID int64, walletID string) error {
-	// Convert string ID to int64
 	walletIDInt, err := strconv.ParseInt(walletID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid wallet ID: %w", err)
 	}
 
-	// Use real wallet service to delete wallet
 	err = w.serviceAdapter.container.GetWalletService().DeleteWallet(ctx, userID, walletIDInt)
 	if err != nil {
 		return fmt.Errorf("failed to delete wallet: %w", err)
@@ -157,10 +142,8 @@ func (w *WalletServiceAdapter) DeleteWallet(ctx context.Context, userID int64, w
 
 // GetWalletPnL получает реальный PnL для кошелька
 func (adapter *ServiceContainerAdapter) GetWalletPnL(ctx context.Context, walletID int64) (float64, error) {
-	// Получаем PnL summary для кошелька
 	pnlSummary, err := adapter.container.GetPortfolioService().CalculatePnL(ctx, walletID)
 	if err != nil {
-		// Если нет данных о позициях, возвращаем 0
 		log.Printf("Warning: failed to get PnL for wallet %d: %v", walletID, err)
 		return 0, nil
 	}
@@ -220,9 +203,6 @@ func (s *SettingsServiceAdapter) ResetToDefaults(ctx context.Context, userID int
 
 // GetTokenSwapService получает НОВЫЙ модульный TradingService вместо старого TokenSwapService
 func (adapter *ServiceContainerAdapter) GetTokenSwapService() *TokenSwapService {
-	// ВРЕМЕННО: создаем обертку которая использует наши НОВЫЕ модульные сервисы
-
-	// Получаем модульные сервисы
 	tradingService := adapter.container.GetTradingService()
 	if tradingService == nil {
 		log.Printf("🚨 WARNING: TradingService is nil, falling back to old TokenSwapService")
