@@ -1,0 +1,87 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - bodyclose
+    - dupl
+    - errcheck
+    - goconst
+    - gocritic
+    - gocyclo
+    - gofmt
+    - goimports
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - typecheck
+    - unconvert
+   # - unpar
+   # - am
+    - unused
+    - whitespace
+    - copyloopvar
+
+govet:
+  check-shadowing: false
+  enable-all: false
+  disable:
+    - fieldalignment
+gocyclo:
+  min-complexity: 15
+dupl:
+  threshold: 100
+goconst:
+  min-len: 2
+  min-occurrences: 3
+misspell:
+  locale: US
+lll:
+  line-length: 120
+goimports:
+  local-prefixes: trust_wallet_homework
+gocritic:
+  enabled-tags:
+    - diagnostic
+    - experimental
+    - opinionated
+    - performance
+    - style
+  disabled-checks:
+    - dupImport
+    - ifElseChain
+    - octalLiteral
+    - wrapperFunc
+    - rangeValCopy
+    - hugeParam
+revive:
+  confidence: 0.8
+errcheck:
+  check-type-assertions: true
+  check-blank: true
+gosec:
+  confidence: "medium"
+  severity: "medium"
+  excludes:
+    - G104
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: vendor/
+      text: ".*"
+    - path: _test\\.go
+      text: ".*"
+    - linters:
+        - gosec
+      text: "G304"
+      path: internal/config/config.go

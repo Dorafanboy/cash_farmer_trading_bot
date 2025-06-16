@@ -1,6 +1,38 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: docker.io/postgres:16.3
+    container_name: cash_farmer_postgres
+    environment:
+      POSTGRES_DB: cash_farmer
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cash_farmer"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: cash_farmer_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 100mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   bot:
     build:
       context: .
@@ -9,6 +41,39 @@ services:
     image: bot:latest 
     ports:
       - "8080:8080"
-    volumes:
-      - ./config/config.yml:/app/config/config.yml:ro 
+    environment:
+      # Database configuration
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: password
+      DB_NAME: cash_farmer
+      DB_SSL_MODE: disable
+      
+      # Redis configuration
+      REDIS_URL: redis://redis:6379
+      
+      # Solana configuration
+      SOLANA_RPC_URL: https://mainnet.helius-rpc.com/?api-key=97f4303e-3cbd-4417-8c0f-bfdcf31e3cec
+      JUPITER_API_URL: https://quote-api.jup.ag/v6
+      JITO_RPC_URL: https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles
+      DEXSCREENER_API_URL: https://api.dexscreener.com
+      
+      # Security (должен быть установлен реальный ключ)
+      CASH_FARMER_MASTER_KEY: ${CASH_FARMER_MASTER_KEY}
+      
+      # Bot configuration
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      BOT_DEBUG: "false"
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
